@@ -1,19 +1,18 @@
-import sqlite3
+import psycopg2
+import psycopg2.extras
 from contextlib import contextmanager
 import os
 
-DB_PATH = "knowledge_vault.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 @contextmanager
 def get_db():
     conn = get_connection()
+    conn.cursor_factory = psycopg2.extras.RealDictCursor
     try:
         yield conn
         conn.commit()
@@ -25,17 +24,19 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        conn.executescript("""
+        cursor = conn.cursor()
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 email TEXT UNIQUE NOT NULL,
                 hashed_password TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 encrypted_content TEXT NOT NULL,
@@ -46,9 +47,10 @@ def init_db():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
-
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS documents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id INTEGER NOT NULL,
                 filename TEXT NOT NULL,
                 original_name TEXT NOT NULL,
@@ -61,4 +63,5 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
         """)
+        cursor.close()
     print("✅ Database initialized")
