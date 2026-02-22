@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
 import json
@@ -36,31 +36,38 @@ def note_to_dict(note, decrypt=False):
 @router.get("/")
 def list_notes(current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
-        notes = conn.execute(
-            "SELECT id, user_id, title, tags, is_pinned, created_at, updated_at FROM notes WHERE user_id = ? ORDER BY is_pinned DESC, updated_at DESC",
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, user_id, title, tags, is_pinned, created_at, updated_at FROM notes WHERE user_id = %s ORDER BY is_pinned DESC, updated_at DESC",
             (current_user["id"],)
-        ).fetchall()
+        )
+        notes = cursor.fetchall()
+        cursor.close()
     return [note_to_dict(n) for n in notes]
 
 @router.post("/")
 def create_note(data: NoteCreate, current_user: dict = Depends(get_current_user)):
     encrypted = encrypt_content(data.content)
     tags_json = json.dumps(data.tags)
-    
     with get_db() as conn:
-        cursor = conn.execute(
-            "INSERT INTO notes (user_id, title, encrypted_content, tags) VALUES (?, ?, ?, ?)",
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO notes (user_id, title, encrypted_content, tags) VALUES (%s, %s, %s, %s) RETURNING id",
             (current_user["id"], data.title, encrypted, tags_json)
         )
-        note_id = cursor.lastrowid
-        note = conn.execute("SELECT id, user_id, title, tags, is_pinned, created_at, updated_at FROM notes WHERE id = ?", (note_id,)).fetchone()
-    
+        note_id = cursor.fetchone()["id"]
+        cursor.execute("SELECT id, user_id, title, tags, is_pinned, created_at, updated_at FROM notes WHERE id = %s", (note_id,))
+        note = cursor.fetchone()
+        cursor.close()
     return note_to_dict(note)
 
 @router.get("/{note_id}")
 def get_note(note_id: int, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
-        note = conn.execute("SELECT * FROM notes WHERE id = ? AND user_id = ?", (note_id, current_user["id"])).fetchone()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notes WHERE id = %s AND user_id = %s", (note_id, current_user["id"]))
+        note = cursor.fetchone()
+        cursor.close()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
     return note_to_dict(note, decrypt=True)
@@ -68,62 +75,64 @@ def get_note(note_id: int, current_user: dict = Depends(get_current_user)):
 @router.put("/{note_id}")
 def update_note(note_id: int, data: NoteUpdate, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
-        note = conn.execute("SELECT * FROM notes WHERE id = ? AND user_id = ?", (note_id, current_user["id"])).fetchone()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notes WHERE id = %s AND user_id = %s", (note_id, current_user["id"]))
+        note = cursor.fetchone()
         if not note:
             raise HTTPException(status_code=404, detail="Note not found")
-        
         updates = []
         params = []
-        
         if data.title is not None:
-            updates.append("title = ?")
+            updates.append("title = %s")
             params.append(data.title)
         if data.content is not None:
-            updates.append("encrypted_content = ?")
+            updates.append("encrypted_content = %s")
             params.append(encrypt_content(data.content))
         if data.tags is not None:
-            updates.append("tags = ?")
+            updates.append("tags = %s")
             params.append(json.dumps(data.tags))
         if data.is_pinned is not None:
-            updates.append("is_pinned = ?")
+            updates.append("is_pinned = %s")
             params.append(1 if data.is_pinned else 0)
-        
         if updates:
             updates.append("updated_at = CURRENT_TIMESTAMP")
             params.append(note_id)
-            conn.execute(f"UPDATE notes SET {', '.join(updates)} WHERE id = ?", params)
-        
-        updated = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
-    
+            cursor.execute(f"UPDATE notes SET {', '.join(updates)} WHERE id = %s", params)
+        cursor.execute("SELECT * FROM notes WHERE id = %s", (note_id,))
+        updated = cursor.fetchone()
+        cursor.close()
     return note_to_dict(updated, decrypt=True)
 
 @router.delete("/{note_id}")
 def delete_note(note_id: int, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
-        note = conn.execute("SELECT id FROM notes WHERE id = ? AND user_id = ?", (note_id, current_user["id"])).fetchone()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM notes WHERE id = %s AND user_id = %s", (note_id, current_user["id"]))
+        note = cursor.fetchone()
         if not note:
             raise HTTPException(status_code=404, detail="Note not found")
-        conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        cursor.execute("DELETE FROM notes WHERE id = %s", (note_id,))
+        cursor.close()
     return {"message": "Note deleted"}
 
 @router.get("/{note_id}/related")
 def get_related_notes(note_id: int, current_user: dict = Depends(get_current_user)):
-    """Find related notes by matching tags."""
     with get_db() as conn:
-        note = conn.execute("SELECT * FROM notes WHERE id = ? AND user_id = ?", (note_id, current_user["id"])).fetchone()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notes WHERE id = %s AND user_id = %s", (note_id, current_user["id"]))
+        note = cursor.fetchone()
         if not note:
             raise HTTPException(status_code=404, detail="Note not found")
-        
         note_tags = json.loads(note["tags"] or "[]")
         if not note_tags:
+            cursor.close()
             return []
-        
-        other_notes = conn.execute(
-            "SELECT id, title, tags, updated_at FROM notes WHERE user_id = ? AND id != ?",
+        cursor.execute(
+            "SELECT id, title, tags, updated_at FROM notes WHERE user_id = %s AND id != %s",
             (current_user["id"], note_id)
-        ).fetchall()
-    
-    # Score by tag overlap
+        )
+        other_notes = cursor.fetchall()
+        cursor.close()
     results = []
     for n in other_notes:
         other_tags = json.loads(n["tags"] or "[]")
@@ -133,23 +142,21 @@ def get_related_notes(note_id: int, current_user: dict = Depends(get_current_use
         if overlap > 0:
             max_possible = max(len(note_tags), len(other_tags))
             results.append({
-                "id": n["id"],
-                "title": n["title"],
-                "tags": other_tags,
-                "updated_at": n["updated_at"],
-                "similarity": round(overlap / max_possible, 2)
+                "id": n["id"], "title": n["title"], "tags": other_tags,
+                "updated_at": n["updated_at"], "similarity": round(overlap / max_possible, 2)
             })
-    
     results.sort(key=lambda x: x["similarity"], reverse=True)
     return results[:5]
 
 @router.post("/{note_id}/summarize")
 def summarize_note(note_id: int, current_user: dict = Depends(get_current_user)):
     with get_db() as conn:
-        note = conn.execute("SELECT * FROM notes WHERE id = ? AND user_id = ?", (note_id, current_user["id"])).fetchone()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notes WHERE id = %s AND user_id = %s", (note_id, current_user["id"]))
+        note = cursor.fetchone()
+        cursor.close()
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
-    
     content = decrypt_content(note["encrypted_content"])
     summary = summarize_text(content)
     return {"summary": summary}
